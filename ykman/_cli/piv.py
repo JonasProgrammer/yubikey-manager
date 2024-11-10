@@ -79,6 +79,7 @@ from .util import (
 )
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.backends import default_backend
+from cryptography.x509 import ObjectIdentifier, ExtensionType
 from uuid import uuid4
 
 import click
@@ -1209,8 +1210,20 @@ def generate_certificate(
     required=True,
 )
 @click_hash_option
+@click.option(
+    "-A",
+    "--attributes",
+    help="additional attributes for the csr, in oid=base64 or oid:hex format",
+    multiple=True,
+)
+@click.option(
+    "-e",
+    "--extensions",
+    help="additional extensions for the csr, in oid=ext-str format",
+    multiple=True,
+)
 def generate_certificate_signing_request(
-    ctx, pin, slot, public_key, csr_output, subject, hash_algorithm
+    ctx, pin, slot, public_key, csr_output, subject, hash_algorithm, attributes, extensions,
 ):
     """
     Generate a Certificate Signing Request (CSR).
@@ -1232,6 +1245,9 @@ def generate_certificate_signing_request(
         # Old style, common name only.
         subject = "CN=" + subject
 
+    parsed_attrs = list([_parse_attribute(a) for a in attributes])
+    parsed_ext = list([_parse_extension(e) for e in extensions])
+
     try:
         metadata = session.get_slot_metadata(slot)
         if metadata.touch_policy in (TOUCH_POLICY.ALWAYS, TOUCH_POLICY.CACHED):
@@ -1250,7 +1266,7 @@ def generate_certificate_signing_request(
 
     try:
         with prompt_timeout(timeout=timeout):
-            csr = generate_csr(session, slot, public_key, subject, hash_algorithm)
+            csr = generate_csr(session, slot, public_key, subject, parsed_attrs, parsed_ext, hash_algorithm)
     except ApduError:
         raise CliFail("Certificate Signing Request generation failed.")
 
@@ -1511,3 +1527,119 @@ def _check_key_support_fips(ctx, key_type, pin_policy):
             raise CliFail(
                 f"PIN policy {pin_policy.name} not supported on YubiKey FIPS."
             )
+
+
+def _parse_attribute(raw: str) -> tuple[ObjectIdentifier, bytes]:
+    from base64 import b64decode
+
+    if "=" in raw:
+        roid, rhex = raw.split("=", 1)
+        return ObjectIdentifier(roid.strip()), bytes.fromhex(rhex.strip())
+    if ":" in raw:
+        roid, rb64 = raw.split(":", 1)
+        return ObjectIdentifier(roid.strip()), b64decode(rb64.strip())
+    raise CliFail(f"Invalid attribute syntax: {raw}")
+
+
+def _parse_extension(raw: str, critical=False) -> tuple[ExtensionType, bool]:
+    lostrip = lambda s: s.strip().lower()
+
+    tag, val = raw.split(":", 1)
+    tag = lostrip(tag)
+    val = val.strip()
+
+    if tag in ["critical", "crit"]:
+        return _parse_extension(val, critical=True)
+
+    if tag in ["keyusage", "ku"]:
+        from cryptography.x509 import KeyUsage
+
+        # renames from (lowercased) standard names to kw-names
+        renames = {
+            "digitalsignature": "digital_signature",
+            "nonrepudiation": "content_commitment",
+            "keyencipherment": "key_encipherment",
+            "dataencipherment": "data_encipherment",
+            "keyagreement": "key_agreement",
+            "keycertsign": "key_cert_sign",
+            "crlsign": "crl_sign",
+            "encipheronly": "encipher_only",
+            "decipheronly": "decipher_only",
+        }
+
+        args = {
+            "digital_signature": False,
+            "content_commitment": False,
+            "key_encipherment": False,
+            "data_encipherment": False,
+            "key_agreement": False,
+            "key_cert_sign": False,
+            "crl_sign": False,
+            "encipher_only": False,
+            "decipher_only": False,
+        }
+        for usage in map(lostrip, val.split(",")):
+            args[renames.get(usage, usage)] = True
+
+        return KeyUsage(**args), critical
+
+    if tag in ["extendedkeyusage", "eku"]:
+        from cryptography.x509 import ExtendedKeyUsage
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+
+        lut_key = lambda s: s.replace("_", "").replace("-", "")
+        lut = {
+            "serverauth": ExtendedKeyUsageOID.SERVER_AUTH,
+            "clientauth": ExtendedKeyUsageOID.CLIENT_AUTH,
+            "codesigning": ExtendedKeyUsageOID.CODE_SIGNING,
+            "emailprotection": ExtendedKeyUsageOID.EMAIL_PROTECTION,
+            "timestamping": ExtendedKeyUsageOID.TIME_STAMPING,
+            "oscpsigning": ExtendedKeyUsageOID.OCSP_SIGNING,
+
+            "anyextendedkeyusage": ExtendedKeyUsageOID.ANY_EXTENDED_KEY_USAGE,
+            "anyeku": ExtendedKeyUsageOID.ANY_EXTENDED_KEY_USAGE,
+            "any": ExtendedKeyUsageOID.ANY_EXTENDED_KEY_USAGE,
+
+            "smartcardlogon": ExtendedKeyUsageOID.SMARTCARD_LOGON,
+            "kerberospkinitkdc": ExtendedKeyUsageOID.KERBEROS_PKINIT_KDC,
+            "ipsecike": ExtendedKeyUsageOID.IPSEC_IKE,
+
+            "certificatetransparency": ExtendedKeyUsageOID.CERTIFICATE_TRANSPARENCY,
+            "ct": ExtendedKeyUsageOID.CERTIFICATE_TRANSPARENCY,
+        }
+
+        ekus = [lut.get(lut_key(eku)) or ObjectIdentifier(eku) for eku in map(lostrip, val.split(","))]
+
+        return ExtendedKeyUsage(ekus), critical
+
+    if tag in ["subjectalternativename", "subjectaltname", "san"]:
+        import re
+        from ipaddress import ip_address
+        from cryptography.x509 import (RFC822Name, DNSName, DirectoryName, UniformResourceIdentifier,
+                                       IPAddress, RegisteredID, OtherName, SubjectAlternativeName)
+
+        ip_helper = lambda s: IPAddress(ip_address(s))
+        oid_helper = lambda s: RegisteredID(ObjectIdentifier(s))
+        lut = {
+            "rfc822name": RFC822Name,
+            "rfc822": RFC822Name,
+            "dnsname": DNSName,
+            "dns": DNSName,
+            "directoryname": DirectoryName,
+            "dn": DirectoryName,
+            "uniformresourceidentifier": UniformResourceIdentifier,
+            "uri": UniformResourceIdentifier,
+            "ipaddress": ip_helper,
+            "ip": ip_helper,
+            "registeredid": oid_helper,
+            "rid": oid_helper,
+            "oid": oid_helper,
+            "other": lambda s: OtherName(*_parse_attribute(s)),
+        }
+
+        names = [n.strip().replace(",,", ",").split(":", 1)
+                 for n in re.split(r"(?<!,),(?!,)", val)]
+
+        return SubjectAlternativeName(*[lut[kind](name) for kind, name in names]), critical
+
+    raise CliFail(f"unknown extension type: {tag}")

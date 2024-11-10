@@ -302,7 +302,7 @@ class TestKeyManagement:
         public_key = generate_key(session, scp, keys, SLOT.AUTHENTICATION)
 
         session.verify_pin(keys.pin)
-        csr = generate_csr(session, SLOT.AUTHENTICATION, public_key, "CN=alice")
+        csr = generate_csr(session, SLOT.AUTHENTICATION, public_key, "CN=alice", [], [])
 
         assert csr.public_key().public_numbers() == public_key.public_numbers()
         assert (

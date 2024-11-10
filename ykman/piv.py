@@ -24,7 +24,7 @@
 # LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
 # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
-
+from cryptography.x509 import ExtensionType, ObjectIdentifier
 
 from yubikit.core import Tlv, BadResponseError, NotSupportedError
 from yubikit.core.smartcard import ApduError, SW
@@ -787,6 +787,8 @@ def generate_csr(
     slot: SLOT,
     public_key: Union[rsa.RSAPublicKey, ec.EllipticCurvePublicKey],
     subject_str: str,
+    attributes: list[tuple[ObjectIdentifier, bytes]],
+    extensions: list[tuple[ExtensionType, bool]],
     hash_algorithm: Type[_AllowedHashTypes] = hashes.SHA256,
 ) -> x509.CertificateSigningRequest:
     """Generate a CSR using a private key in a slot.
@@ -795,11 +797,19 @@ def generate_csr(
     :param slot: The slot.
     :param public_key: The public key.
     :param subject_str: The subject RFC 4514 string.
+    :param attributes: Additional attributes for the CSR.
+    :param extensions: Additional extensions for the CSR.
     :param hash_algorithm: The hash algorithm.
     """
     logger.debug("Generating a CSR")
     builder = x509.CertificateSigningRequestBuilder().subject_name(
         parse_rfc4514_string(subject_str)
     )
+
+    for oid, val in attributes:
+        builder = builder.add_attribute(oid, val)
+
+    for ext, critical in extensions:
+        builder = builder.add_extension(ext, critical)
 
     return sign_csr_builder(session, slot, public_key, builder, hash_algorithm)
