@@ -1640,6 +1640,6 @@ def _parse_extension(raw: str, critical=False) -> tuple[ExtensionType, bool]:
         names = [n.strip().replace(",,", ",").split(":", 1)
                  for n in re.split(r"(?<!,),(?!,)", val)]
 
-        return SubjectAlternativeName(*[lut[kind](name) for kind, name in names]), critical
+        return SubjectAlternativeName([lut[kind](name) for kind, name in names]), critical
 
     raise CliFail(f"unknown extension type: {tag}")
